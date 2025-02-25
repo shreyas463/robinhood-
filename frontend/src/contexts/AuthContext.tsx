@@ -1,12 +1,21 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged,
+  User as FirebaseUser
+} from 'firebase/auth';
+import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { auth, db } from '@/firebase/config';
 
 interface AuthContextType {
   user: User | null;
-  login: (username: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
   register: (username: string, email: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   isAuthenticated: boolean;
   isLoading: boolean;
 }
@@ -14,7 +23,7 @@ interface AuthContextType {
 interface User {
   username: string;
   email: string;
-  token: string;
+  uid: string;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -25,94 +34,194 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Check for stored auth token on mount
-    const checkAuth = () => {
-      const storedUser = localStorage.getItem('user');
-      if (storedUser) {
-        try {
-          const parsedUser = JSON.parse(storedUser);
-          setUser(parsedUser);
-          setIsAuthenticated(true);
-        } catch (error) {
-          console.error('Error parsing stored user:', error);
-          localStorage.removeItem('user');
-        }
-      }
-      setIsLoading(false);
-    };
-    
-    checkAuth();
-  }, []);
-
-  const login = async (username: string, password: string) => {
-    try {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setIsLoading(true);
-      const response = await fetch('http://localhost:5001/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ username, password }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to login');
+      if (firebaseUser) {
+        try {
+          // Get user data from Firestore
+          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+          
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            setUser({
+              uid: firebaseUser.uid,
+              email: userData.email || firebaseUser.email || '',
+              username: userData.username || ''
+            });
+            setIsAuthenticated(true);
+            
+            // Generate a JWT token for backend API calls
+            try {
+              const idToken = await firebaseUser.getIdToken();
+              localStorage.setItem('jwt_token', idToken);
+            } catch (error) {
+              console.error("Error getting ID token:", error);
+            }
+          } else {
+            // If user document doesn't exist but auth does, create it
+            if (firebaseUser.email) {
+              const newUser = {
+                uid: firebaseUser.uid,
+                email: firebaseUser.email,
+                username: firebaseUser.email.split('@')[0],
+                created_at: serverTimestamp(),
+                balance: 10000 // Default starting balance
+              };
+              
+              await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
+              
+              setUser({
+                uid: firebaseUser.uid,
+                email: firebaseUser.email,
+                username: newUser.username
+              });
+              setIsAuthenticated(true);
+              
+              // Generate a JWT token for backend API calls
+              try {
+                const idToken = await firebaseUser.getIdToken();
+                localStorage.setItem('jwt_token', idToken);
+              } catch (error) {
+                console.error("Error getting ID token:", error);
+              }
+            }
+          }
+        } catch (error) {
+          console.error("Error fetching user data:", error);
+          setUser(null);
+          setIsAuthenticated(false);
+          localStorage.removeItem('jwt_token');
+        }
+      } else {
+        setUser(null);
+        setIsAuthenticated(false);
+        localStorage.removeItem('jwt_token');
       }
-
-      const userWithToken = {
-        username: data.username,
-        email: data.email,
-        token: data.token,
-      };
-
-      localStorage.setItem('user', JSON.stringify(userWithToken));
-      setUser(userWithToken);
-      setIsAuthenticated(true);
-    } catch (error) {
-      if (error instanceof Error) {
-        throw new Error(error.message);
-      }
-      throw new Error('Failed to login');
-    } finally {
       setIsLoading(false);
-    }
-  };
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const register = async (username: string, email: string, password: string) => {
     try {
       setIsLoading(true);
-      const response = await fetch('http://localhost:5001/api/auth/register', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ username, email, password }),
+      console.log(`Attempting to register user: ${email}`);
+      
+      // Create user in Firebase Auth
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const firebaseUser = userCredential.user;
+      
+      console.log(`User registered successfully with UID: ${firebaseUser.uid}`);
+      
+      // Create user document in Firestore
+      const userData = {
+        uid: firebaseUser.uid,
+        username,
+        email,
+        created_at: serverTimestamp(),
+        balance: 10000 // Default starting balance
+      };
+      
+      await setDoc(doc(db, 'users', firebaseUser.uid), userData);
+      console.log(`User document created in Firestore`);
+      
+      setUser({
+        uid: firebaseUser.uid,
+        email,
+        username
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to register');
+      setIsAuthenticated(true);
+      
+      // Generate a JWT token for backend API calls
+      try {
+        const idToken = await firebaseUser.getIdToken();
+        localStorage.setItem('jwt_token', idToken);
+      } catch (error) {
+        console.error("Error getting ID token:", error);
       }
-
-      // After successful registration, automatically log in
-      await login(username, password);
-    } catch (error) {
-      if (error instanceof Error) {
-        throw new Error(error.message);
-      }
-      throw new Error('Failed to register');
+    } catch (error: any) {
+      console.error("Registration error:", error.message);
+      throw error;
     } finally {
       setIsLoading(false);
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem('user');
-    setUser(null);
-    setIsAuthenticated(false);
+  const login = async (email: string, password: string) => {
+    try {
+      setIsLoading(true);
+      console.log(`Attempting to log in user: ${email}`);
+      
+      // Sign in with Firebase Auth
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const firebaseUser = userCredential.user;
+      
+      console.log(`User logged in successfully with UID: ${firebaseUser.uid}`);
+      
+      // Get user data from Firestore
+      const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+      
+      if (userDoc.exists()) {
+        const userData = userDoc.data();
+        setUser({
+          uid: firebaseUser.uid,
+          email: userData.email,
+          username: userData.username
+        });
+      } else {
+        // If user document doesn't exist, create it
+        const username = email.split('@')[0];
+        const userData = {
+          uid: firebaseUser.uid,
+          username,
+          email,
+          created_at: serverTimestamp(),
+          balance: 10000 // Default starting balance
+        };
+        
+        await setDoc(doc(db, 'users', firebaseUser.uid), userData);
+        console.log(`User document created in Firestore during login`);
+        
+        setUser({
+          uid: firebaseUser.uid,
+          email,
+          username
+        });
+      }
+      
+      setIsAuthenticated(true);
+      
+      // Generate a JWT token for backend API calls
+      try {
+        const idToken = await firebaseUser.getIdToken();
+        localStorage.setItem('jwt_token', idToken);
+        console.log("JWT token stored in localStorage");
+      } catch (error) {
+        console.error("Error getting ID token:", error);
+      }
+    } catch (error: any) {
+      console.error("Login error:", error.message);
+      throw error;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      setIsLoading(true);
+      await signOut(auth);
+      setUser(null);
+      setIsAuthenticated(false);
+      localStorage.removeItem('jwt_token');
+      console.log("User logged out successfully");
+    } catch (error: any) {
+      console.error("Logout error:", error.message);
+      throw error;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (

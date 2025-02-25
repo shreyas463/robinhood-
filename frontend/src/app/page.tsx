@@ -7,7 +7,6 @@ import StockChart from '../components/StockChart';
 import NewsSection from '../components/NewsSection';
 import TradingPanel from '../components/TradingPanel';
 import TopGainers from '../components/TopGainers';
-import { LoginForm, RegisterForm } from '@/components/AuthForms';
 import Discussion from '@/components/Discussion';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRouter } from 'next/navigation';
@@ -19,7 +18,6 @@ export default function Home() {
   const [stockData, setStockData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showLogin, setShowLogin] = useState(true);
   const { user, logout, isAuthenticated, isLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<'market' | 'discussion'>('market');
   const router = useRouter();
@@ -65,42 +63,7 @@ export default function Home() {
   }
 
   if (!isAuthenticated) {
-    return (
-      <main className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
-        <div className="max-w-md w-full">
-          <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold text-white mb-4">Welcome to RobinHood Clone</h1>
-            <p className="text-gray-400 text-lg">Your modern platform for stock trading</p>
-          </div>
-          
-          <div className="bg-gray-800 rounded-xl p-8 shadow-2xl">
-            <div className="flex justify-center space-x-4 mb-6">
-              <button
-                onClick={() => setShowLogin(true)}
-                className={`px-8 py-3 rounded-lg text-lg font-medium transition-all duration-200 ${
-                  showLogin 
-                    ? 'bg-green-600 text-white shadow-lg' 
-                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                }`}
-              >
-                Login
-              </button>
-              <button
-                onClick={() => setShowLogin(false)}
-                className={`px-8 py-3 rounded-lg text-lg font-medium transition-all duration-200 ${
-                  !showLogin 
-                    ? 'bg-green-600 text-white shadow-lg' 
-                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                }`}
-              >
-                Register
-              </button>
-            </div>
-            {showLogin ? <LoginForm /> : <RegisterForm />}
-          </div>
-        </div>
-      </main>
-    );
+    return null;
   }
 
   return (
@@ -127,7 +90,7 @@ export default function Home() {
                 letterSpacing: '-0.5px'
               }}
             >
-              Stock Trading Dashboard
+              Stockerr Dashboard
             </Typography>
             <Box sx={{ display: 'flex', gap: 2 }}>
               <Button

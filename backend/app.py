@@ -1,19 +1,18 @@
-from flask import Flask, jsonify, request, session
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
 import finnhub
-import requests
 from datetime import datetime, timedelta
 import logging
-from flask_sqlalchemy import SQLAlchemy
-from werkzeug.security import generate_password_hash, check_password_hash
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
 import jwt
 from functools import wraps
 import random
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -21,95 +20,20 @@ load_dotenv()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
-    'DATABASE_URL', 'sqlite:///robinhood.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Configure CORS to allow requests from frontend
+# Configure CORS
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "http://localhost:3001"],
+        "origins": ["http://localhost:3000"],
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }
 })
 
-db = SQLAlchemy(app)
-
-# User model
-
-
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(200), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    balance = db.Column(db.Float, default=0.0)  # User's cash balance
-    portfolio = db.relationship('Portfolio', backref='user', lazy=True)
-    transactions = db.relationship('Transaction', backref='user', lazy=True)
-
-# Message model for discussions
-
-
-class Message(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    content = db.Column(db.Text, nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    user = db.relationship('User', backref=db.backref('messages', lazy=True))
-
-
-class Portfolio(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    symbol = db.Column(db.String(10), nullable=False)
-    shares = db.Column(db.Integer, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(
-        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    __table_args__ = (db.UniqueConstraint(
-        'user_id', 'symbol', name='unique_user_symbol'),)
-
-
-class Transaction(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    symbol = db.Column(db.String(10), nullable=False)
-    shares = db.Column(db.Integer, nullable=False)
-    price = db.Column(db.Float, nullable=False)
-    type = db.Column(db.String(4), nullable=False)  # 'buy' or 'sell'
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-# Initialize database
-with app.app_context():
-    db.create_all()
-    logger.info("Database initialized")
-
-# Token required decorator
-
-
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        if 'Authorization' in request.headers:
-            token = request.headers['Authorization'].split(" ")[1]
-
-        if not token:
-            return jsonify({'error': 'Token is missing'}), 401
-
-        try:
-            data = jwt.decode(
-                token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_user = User.query.get(data['user_id'])
-        except:
-            return jsonify({'error': 'Token is invalid'}), 401
-
-        return f(current_user, *args, **kwargs)
-    return decorated
-
+# Initialize Firebase Admin
+cred = credentials.Certificate('serviceAccountKey.json')
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
 # API keys
 FINNHUB_KEY = os.getenv('FINNHUB_API_KEY')
@@ -120,20 +44,41 @@ if not all([FINNHUB_KEY, ALPHA_VANTAGE_KEY, NEWS_API_KEY]):
     logger.error("Missing required API keys!")
     raise ValueError("Missing required API keys!")
 
-logger.info(f"Finnhub API Key: {FINNHUB_KEY[:5]}...")
-logger.info(f"Alpha Vantage API Key: {ALPHA_VANTAGE_KEY[:5]}...")
-logger.info(f"News API Key: {NEWS_API_KEY[:5]}...")
-
-# API clients initialization
+# Initialize Finnhub client
 try:
     finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
 except Exception as e:
     logger.error(f"Error initializing Finnhub client: {str(e)}")
     raise
 
-# Add cache dictionary at the top level
-stock_data_cache = {}
-CACHE_DURATION = 300  # 5 minutes in seconds
+# Token required decorator
+
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            if auth_header.startswith('Bearer '):
+                token = auth_header.split(" ")[1]
+
+        if not token:
+            return jsonify({'error': 'Token is missing'}), 401
+
+        try:
+            # Verify the Firebase ID token
+            decoded_token = auth.verify_id_token(token)
+            uid = decoded_token['uid']
+            # Get user from Firebase
+            current_user = auth.get_user(uid)
+            logger.info(f"Authenticated user: {current_user.uid}")
+        except Exception as e:
+            logger.error(f"Token verification error: {str(e)}")
+            return jsonify({'error': 'Token is invalid'}), 401
+
+        return f(current_user, *args, **kwargs)
+    return decorated
 
 
 @app.route('/')
@@ -141,193 +86,6 @@ def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 
-@app.route('/api/stock/<symbol>')
-def get_stock_data(symbol):
-    try:
-        logger.info(f"Fetching stock data for {symbol}")
-        current_time = datetime.now().timestamp()
-
-        # Check cache first
-        if symbol in stock_data_cache:
-            cached_data = stock_data_cache[symbol]
-            if current_time - cached_data['timestamp'] < CACHE_DURATION:
-                logger.info(f"Returning cached data for {symbol}")
-                return jsonify(cached_data['data'])
-
-        # Get real-time quote from Finnhub
-        quote = finnhub_client.quote(symbol)
-        logger.debug(f"Finnhub quote response: {quote}")
-
-        if not quote or 'c' not in quote:
-            logger.error(f"Invalid quote data received for {symbol}")
-            return jsonify({'error': 'Invalid quote data'}), 400
-
-        # Try to get historical data from Alpha Vantage
-        historical_data = []
-        try:
-            url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={ALPHA_VANTAGE_KEY}'
-            response = requests.get(url)
-            data = response.json()
-
-            if "Time Series (Daily)" in data:
-                time_series = data["Time Series (Daily)"]
-                for date in sorted(time_series.keys(), reverse=True)[:30]:
-                    historical_data.append({
-                        'date': date,
-                        'close': time_series[date]['4. close']
-                    })
-            else:
-                # Fallback: Generate historical data from current price
-                logger.info(f"Using fallback historical data for {symbol}")
-                for i in range(30):
-                    date = (datetime.now() - timedelta(days=i)
-                            ).strftime('%Y-%m-%d')
-                    # Add small random variation to create realistic looking data
-                    variation = (1 + (random.random() - 0.5)
-                                 * 0.02)  # ±1% variation
-                    historical_data.append({
-                        'date': date,
-                        'close': str(quote['c'] * variation)
-                    })
-        except Exception as e:
-            logger.error(f"Error fetching historical data: {str(e)}")
-            # Use fallback data even in case of exception
-            for i in range(30):
-                date = (datetime.now() - timedelta(days=i)
-                        ).strftime('%Y-%m-%d')
-                variation = (1 + (random.random() - 0.5) * 0.02)
-                historical_data.append({
-                    'date': date,
-                    'close': str(quote['c'] * variation)
-                })
-
-        response_data = {
-            'quote': quote,
-            'historical': historical_data
-        }
-
-        # Cache the response
-        stock_data_cache[symbol] = {
-            'timestamp': current_time,
-            'data': response_data
-        }
-
-        logger.info(f"Successfully fetched data for {symbol}")
-        return jsonify(response_data)
-
-    except Exception as e:
-        logger.error(f"Error fetching stock data for {symbol}: {str(e)}")
-        return jsonify({'error': str(e)}), 400
-
-
-@app.route('/api/stock/<symbol>/news')
-def get_stock_news(symbol):
-    try:
-        logger.info(f"Fetching news for {symbol}")
-
-        # Get company news from Finnhub
-        today = datetime.now()
-        thirty_days_ago = today - timedelta(days=30)
-
-        news = finnhub_client.company_news(
-            symbol,
-            _from=thirty_days_ago.strftime('%Y-%m-%d'),
-            to=today.strftime('%Y-%m-%d')
-        )
-
-        logger.debug(
-            f"Finnhub news response length: {len(news) if news else 0}")
-
-        if not news:
-            # Use NewsAPI as fallback
-            logger.info(f"No Finnhub news found for {symbol}, using NewsAPI")
-            url = f'https://newsapi.org/v2/everything?q={symbol}&apiKey={NEWS_API_KEY}&language=en&sortBy=publishedAt'
-            response = requests.get(url)
-            data = response.json()
-
-            if data.get('status') == 'ok':
-                news = data.get('articles', [])[:10]
-            else:
-                logger.error(f"NewsAPI error: {data.get('message')}")
-                return jsonify({'error': 'Failed to fetch news'}), 400
-
-        return jsonify(news[:10])
-
-    except Exception as e:
-        logger.error(f"Error fetching news for {symbol}: {str(e)}")
-        return jsonify({'error': str(e)}), 400
-
-
-@app.route('/api/search')
-def search_stocks():
-    query = request.args.get('q', '').upper()
-    try:
-        logger.info(f"Searching stocks with query: {query}")
-        results = []
-
-        # First try direct symbol lookup
-        try:
-            quote = finnhub_client.quote(query)
-            if quote and quote.get('c', 0) > 0:  # If valid quote received
-                profile = finnhub_client.company_profile2(symbol=query)
-                if profile:
-                    results.append({
-                        "symbol": query,
-                        "description": profile.get('name', query),
-                        "displaySymbol": query,
-                        "type": "Common Stock"
-                    })
-        except Exception as e:
-            logger.warning(f"Failed to get direct quote: {str(e)}")
-
-        # If no exact match, search for symbols
-        if not results:
-            search_results = finnhub_client.symbol_search(query)
-            for item in search_results.get('result', []):
-                if (item.get('type') == 'Common Stock' and
-                    any(exchange in item.get('exchange', '')
-                        for exchange in ['NYSE', 'NASDAQ'])):
-                    results.append(item)
-
-        # Sort results to prioritize exact matches
-        results.sort(key=lambda x: (
-            0 if x["symbol"] == query else
-            1 if x["symbol"].startswith(query) else
-            2
-        ))
-
-        return jsonify({'result': results[:10]})  # Limit to top 10 results
-
-    except Exception as e:
-        logger.error(f"Error searching stocks: {str(e)}")
-        return jsonify({'error': str(e)}), 400
-
-
-@app.route('/api/market/top-gainers')
-def get_top_gainers():
-    try:
-        logger.info("Fetching top gainers")
-        symbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'META']
-        gainers = []
-
-        for symbol in symbols:
-            quote = finnhub_client.quote(symbol)
-            if quote and 'c' in quote and 'dp' in quote:
-                gainers.append({
-                    'symbol': symbol,
-                    'price': quote['c'],
-                    'change': quote['dp']
-                })
-
-        sorted_gainers = sorted(
-            gainers, key=lambda x: x['change'], reverse=True)
-        return jsonify(sorted_gainers)
-    except Exception as e:
-        logger.error(f"Error fetching top gainers: {str(e)}")
-        return jsonify({'error': str(e)}), 400
-
-
-# Authentication routes
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -335,119 +93,86 @@ def register():
     if not all(k in data for k in ['username', 'email', 'password']):
         return jsonify({'error': 'Missing required fields'}), 400
 
-    if User.query.filter_by(username=data['username']).first():
-        return jsonify({'error': 'Username already exists'}), 400
+    try:
+        # Create user in Firebase Authentication
+        user = auth.create_user(
+            email=data['email'],
+            password=data['password'],
+            display_name=data['username']
+        )
 
-    if User.query.filter_by(email=data['email']).first():
-        return jsonify({'error': 'Email already exists'}), 400
+        # Create user document in Firestore
+        db.collection('users').document(user.uid).set({
+            'username': data['username'],
+            'email': data['email'],
+            'created_at': datetime.utcnow(),
+            'balance': 10000.0  # Default starting balance
+        })
 
-    user = User(
-        username=data['username'],
-        email=data['email'],
-        password_hash=generate_password_hash(data['password'])
-    )
+        # Generate a custom token for the client
+        custom_token = auth.create_custom_token(user.uid)
 
-    db.session.add(user)
-    db.session.commit()
-
-    return jsonify({'message': 'User created successfully'}), 201
+        return jsonify({
+            'message': 'User created successfully',
+            'token': custom_token.decode('utf-8') if isinstance(custom_token, bytes) else custom_token
+        }), 201
+    except Exception as e:
+        logger.error(f"Registration error: {str(e)}")
+        return jsonify({'error': str(e)}), 400
 
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    data = request.get_json()
-
-    if not all(k in data for k in ['username', 'password']):
-        return jsonify({'error': 'Missing required fields'}), 400
-
-    user = User.query.filter_by(username=data['username']).first()
-
-    if not user or not check_password_hash(user.password_hash, data['password']):
-        return jsonify({'error': 'Invalid username or password'}), 401
-
-    token = jwt.encode({
-        'user_id': user.id,
-        'exp': datetime.utcnow() + timedelta(days=1)
-    }, app.config['SECRET_KEY'])
-
+    # This endpoint is no longer needed as Firebase handles authentication directly
+    # But we'll keep it for compatibility with existing code
     return jsonify({
-        'token': token,
-        'username': user.username,
-        'email': user.email,
-        'balance': user.balance
-    })
-
-# Discussion routes
-
-
-@app.route('/api/discussions', methods=['GET'])
-@token_required
-def get_messages(current_user):
-    messages = Message.query.order_by(
-        Message.created_at.desc()).limit(100).all()
-    return jsonify([{
-        'id': msg.id,
-        'content': msg.content,
-        'username': msg.user.username,
-        'created_at': msg.created_at.isoformat()
-    } for msg in messages])
-
-
-@app.route('/api/discussions', methods=['POST'])
-@token_required
-def create_message(current_user):
-    data = request.get_json()
-
-    if 'content' not in data:
-        return jsonify({'error': 'Message content is required'}), 400
-
-    message = Message(
-        content=data['content'],
-        user_id=current_user.id
-    )
-
-    db.session.add(message)
-    db.session.commit()
-
-    return jsonify({
-        'id': message.id,
-        'content': message.content,
-        'username': current_user.username,
-        'created_at': message.created_at.isoformat()
-    }), 201
-
-# Trading routes
+        'message': 'Please use Firebase authentication directly'
+    }), 200
 
 
 @app.route('/api/trading/balance', methods=['GET'])
 @token_required
 def get_balance(current_user):
-    portfolio = Portfolio.query.filter_by(user_id=current_user.id).all()
-    portfolio_data = []
-    total_value = current_user.balance
+    try:
+        # Get user's portfolio from Firestore
+        portfolio_ref = db.collection('portfolios').where(
+            'user_id', '==', current_user.uid)
+        portfolio_docs = portfolio_ref.stream()
 
-    for position in portfolio:
-        try:
-            quote = finnhub_client.quote(position.symbol)
-            current_price = quote['c']
-            position_value = current_price * position.shares
-            total_value += position_value
+        portfolio_data = []
+        total_value = 0
 
-            portfolio_data.append({
-                'symbol': position.symbol,
-                'shares': position.shares,
-                'current_price': current_price,
-                'position_value': position_value
-            })
-        except Exception as e:
-            logger.error(
-                f"Error fetching quote for {position.symbol}: {str(e)}")
+        # Get user's balance
+        user_doc = db.collection('users').document(current_user.uid).get()
+        user_data = user_doc.to_dict()
+        balance = user_data.get('balance', 0.0)
+        total_value = balance
 
-    return jsonify({
-        'cash_balance': current_user.balance,
-        'portfolio': portfolio_data,
-        'total_value': total_value
-    })
+        for doc in portfolio_docs:
+            position = doc.to_dict()
+            try:
+                quote = finnhub_client.quote(position['symbol'])
+                current_price = quote['c']
+                position_value = current_price * position['shares']
+                total_value += position_value
+
+                portfolio_data.append({
+                    'symbol': position['symbol'],
+                    'shares': position['shares'],
+                    'current_price': current_price,
+                    'position_value': position_value
+                })
+            except Exception as e:
+                logger.error(
+                    f"Error fetching quote for {position['symbol']}: {str(e)}")
+
+        return jsonify({
+            'cash_balance': balance,
+            'portfolio': portfolio_data,
+            'total_value': total_value
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
 
 
 @app.route('/api/trading/add-funds', methods=['POST'])
@@ -459,13 +184,20 @@ def add_funds(current_user):
     if not amount or amount <= 0:
         return jsonify({'error': 'Invalid amount'}), 400
 
-    current_user.balance += amount
-    db.session.commit()
+    try:
+        user_ref = db.collection('users').document(current_user.uid)
+        user_doc = user_ref.get()
+        current_balance = user_doc.to_dict().get('balance', 0.0)
+        new_balance = current_balance + amount
 
-    return jsonify({
-        'message': 'Funds added successfully',
-        'new_balance': current_user.balance
-    })
+        user_ref.update({'balance': new_balance})
+
+        return jsonify({
+            'message': 'Funds added successfully',
+            'new_balance': new_balance
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
 
 
 @app.route('/api/trading/buy', methods=['POST'])
@@ -484,41 +216,54 @@ def buy_stock(current_user):
         price = quote['c']
         total_cost = price * shares
 
-        if total_cost > current_user.balance:
+        # Get user's current balance
+        user_ref = db.collection('users').document(current_user.uid)
+        user_doc = user_ref.get()
+        current_balance = user_doc.to_dict().get('balance', 0.0)
+
+        if total_cost > current_balance:
             return jsonify({'error': 'Insufficient funds'}), 400
 
         # Update or create portfolio position
-        portfolio = Portfolio.query.filter_by(
-            user_id=current_user.id, symbol=symbol).first()
+        portfolio_ref = db.collection('portfolios')
+        position_query = portfolio_ref.where(
+            'user_id', '==', current_user.uid).where('symbol', '==', symbol)
+        position_docs = position_query.stream()
 
-        if portfolio:
-            portfolio.shares += shares
+        position_list = list(position_docs)
+        if position_list:
+            position_doc = position_list[0]
+            current_shares = position_doc.to_dict()['shares']
+            portfolio_ref.document(position_doc.id).update({
+                'shares': current_shares + shares,
+                'updated_at': datetime.utcnow()
+            })
         else:
-            portfolio = Portfolio(
-                user_id=current_user.id,
-                symbol=symbol,
-                shares=shares
-            )
-            db.session.add(portfolio)
+            portfolio_ref.add({
+                'user_id': current_user.uid,
+                'symbol': symbol,
+                'shares': shares,
+                'created_at': datetime.utcnow(),
+                'updated_at': datetime.utcnow()
+            })
 
         # Create transaction record
-        transaction = Transaction(
-            user_id=current_user.id,
-            symbol=symbol,
-            shares=shares,
-            price=price,
-            type='buy'
-        )
+        db.collection('transactions').add({
+            'user_id': current_user.uid,
+            'symbol': symbol,
+            'shares': shares,
+            'price': price,
+            'type': 'buy',
+            'created_at': datetime.utcnow()
+        })
 
         # Update user balance
-        current_user.balance -= total_cost
-
-        db.session.add(transaction)
-        db.session.commit()
+        new_balance = current_balance - total_cost
+        user_ref.update({'balance': new_balance})
 
         return jsonify({
             'message': 'Stock purchased successfully',
-            'new_balance': current_user.balance
+            'new_balance': new_balance
         })
 
     except Exception as e:
@@ -538,11 +283,17 @@ def sell_stock(current_user):
 
     try:
         # Check if user owns enough shares
-        portfolio = Portfolio.query.filter_by(
-            user_id=current_user.id, symbol=symbol).first()
+        portfolio_ref = db.collection('portfolios')
+        position_query = portfolio_ref.where(
+            'user_id', '==', current_user.uid).where('symbol', '==', symbol)
+        position_docs = position_query.stream()
 
-        if not portfolio or portfolio.shares < shares:
+        position_list = list(position_docs)
+        if not position_list or position_list[0].to_dict()['shares'] < shares:
             return jsonify({'error': 'Insufficient shares'}), 400
+
+        position_doc = position_list[0]
+        current_shares = position_doc.to_dict()['shares']
 
         # Get current stock price
         quote = finnhub_client.quote(symbol)
@@ -550,28 +301,34 @@ def sell_stock(current_user):
         total_value = price * shares
 
         # Update portfolio
-        portfolio.shares -= shares
-        if portfolio.shares == 0:
-            db.session.delete(portfolio)
+        if current_shares == shares:
+            portfolio_ref.document(position_doc.id).delete()
+        else:
+            portfolio_ref.document(position_doc.id).update({
+                'shares': current_shares - shares,
+                'updated_at': datetime.utcnow()
+            })
 
         # Create transaction record
-        transaction = Transaction(
-            user_id=current_user.id,
-            symbol=symbol,
-            shares=shares,
-            price=price,
-            type='sell'
-        )
+        db.collection('transactions').add({
+            'user_id': current_user.uid,
+            'symbol': symbol,
+            'shares': shares,
+            'price': price,
+            'type': 'sell',
+            'created_at': datetime.utcnow()
+        })
 
         # Update user balance
-        current_user.balance += total_value
-
-        db.session.add(transaction)
-        db.session.commit()
+        user_ref = db.collection('users').document(current_user.uid)
+        user_doc = user_ref.get()
+        current_balance = user_doc.to_dict().get('balance', 0.0)
+        new_balance = current_balance + total_value
+        user_ref.update({'balance': new_balance})
 
         return jsonify({
             'message': 'Stock sold successfully',
-            'new_balance': current_user.balance
+            'new_balance': new_balance
         })
 
     except Exception as e:
@@ -582,20 +339,260 @@ def sell_stock(current_user):
 @app.route('/api/trading/transactions', methods=['GET'])
 @token_required
 def get_transactions(current_user):
-    transactions = Transaction.query.filter_by(
-        user_id=current_user.id).order_by(Transaction.created_at.desc()).all()
+    try:
+        transactions_ref = db.collection('transactions')
+        query = transactions_ref.where('user_id', '==', current_user.uid).order_by(
+            'created_at', direction=firestore.Query.DESCENDING)
+        transactions = query.stream()
 
-    return jsonify([{
-        'id': t.id,
-        'symbol': t.symbol,
-        'shares': t.shares,
-        'price': t.price,
-        'type': t.type,
-        'total': t.price * t.shares,
-        'created_at': t.created_at.isoformat()
-    } for t in transactions])
+        return jsonify([{
+            'id': doc.id,
+            'symbol': doc.to_dict()['symbol'],
+            'shares': doc.to_dict()['shares'],
+            'price': doc.to_dict()['price'],
+            'type': doc.to_dict()['type'],
+            'total': doc.to_dict()['price'] * doc.to_dict()['shares'],
+            'created_at': doc.to_dict()['created_at'].isoformat()
+        } for doc in transactions])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/discussions', methods=['GET'])
+@token_required
+def get_discussions(current_user):
+    try:
+        messages_ref = db.collection('messages')
+        query = messages_ref.order_by(
+            'created_at', direction=firestore.Query.DESCENDING).limit(50)
+        messages = query.stream()
+
+        return jsonify([{
+            'id': doc.id,
+            'content': doc.to_dict()['content'],
+            'username': doc.to_dict()['username'],
+            'created_at': doc.to_dict()['created_at'].isoformat()
+        } for doc in messages])
+    except Exception as e:
+        logger.error(f"Error fetching discussions: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/discussions', methods=['POST'])
+@token_required
+def create_discussion(current_user):
+    try:
+        data = request.get_json()
+        content = data.get('content')
+
+        if not content:
+            return jsonify({'error': 'Message content is required'}), 400
+
+        # Get user data
+        user_doc = db.collection('users').document(current_user.uid).get()
+        user_data = user_doc.to_dict()
+
+        # Create message
+        message_ref = db.collection('messages').add({
+            'content': content,
+            'user_id': current_user.uid,
+            'username': user_data['username'],
+            'created_at': datetime.utcnow()
+        })
+
+        message_doc = message_ref[1].get()
+        message_data = message_doc.to_dict()
+
+        return jsonify({
+            'id': message_doc.id,
+            'content': message_data['content'],
+            'username': message_data['username'],
+            'created_at': message_data['created_at'].isoformat()
+        }), 201
+    except Exception as e:
+        logger.error(f"Error creating discussion: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/market/top-gainers', methods=['GET'])
+def get_top_gainers():
+    try:
+        # Mock data for top gainers
+        top_gainers = [
+            {"symbol": "AAPL", "price": 175.84, "change": 2.45},
+            {"symbol": "MSFT", "price": 328.79, "change": 1.98},
+            {"symbol": "GOOGL", "price": 138.21, "change": 1.76},
+            {"symbol": "AMZN", "price": 178.35, "change": 1.54},
+            {"symbol": "TSLA", "price": 202.64, "change": 1.32}
+        ]
+        return jsonify(top_gainers)
+    except Exception as e:
+        logger.error(f"Error fetching top gainers: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/search', methods=['GET'])
+def search_stocks():
+    try:
+        query = request.args.get('q', '')
+        if not query or len(query) < 1:
+            return jsonify({'result': []})
+
+        # Use mock data instead of Finnhub API
+        # Common stock symbols and companies
+        mock_stocks = [
+            {'symbol': 'AAPL', 'description': 'Apple Inc.', 'type': 'Common Stock'},
+            {'symbol': 'MSFT', 'description': 'Microsoft Corporation',
+                'type': 'Common Stock'},
+            {'symbol': 'GOOGL', 'description': 'Alphabet Inc.', 'type': 'Common Stock'},
+            {'symbol': 'AMZN', 'description': 'Amazon.com Inc.', 'type': 'Common Stock'},
+            {'symbol': 'META', 'description': 'Meta Platforms Inc.',
+                'type': 'Common Stock'},
+            {'symbol': 'TSLA', 'description': 'Tesla Inc.', 'type': 'Common Stock'},
+            {'symbol': 'NVDA', 'description': 'NVIDIA Corporation',
+                'type': 'Common Stock'},
+            {'symbol': 'JPM', 'description': 'JPMorgan Chase & Co.',
+                'type': 'Common Stock'},
+            {'symbol': 'BAC', 'description': 'Bank of America Corporation',
+                'type': 'Common Stock'},
+            {'symbol': 'WMT', 'description': 'Walmart Inc.', 'type': 'Common Stock'},
+            {'symbol': 'JNJ', 'description': 'Johnson & Johnson',
+                'type': 'Common Stock'},
+            {'symbol': 'PG', 'description': 'Procter & Gamble Co.',
+                'type': 'Common Stock'},
+            {'symbol': 'MA', 'description': 'Mastercard Incorporated',
+                'type': 'Common Stock'},
+            {'symbol': 'V', 'description': 'Visa Inc.', 'type': 'Common Stock'},
+            {'symbol': 'DIS', 'description': 'The Walt Disney Company',
+                'type': 'Common Stock'},
+            {'symbol': 'NFLX', 'description': 'Netflix Inc.', 'type': 'Common Stock'},
+            {'symbol': 'PYPL', 'description': 'PayPal Holdings Inc.',
+                'type': 'Common Stock'},
+            {'symbol': 'INTC', 'description': 'Intel Corporation',
+                'type': 'Common Stock'},
+            {'symbol': 'AMD', 'description': 'Advanced Micro Devices Inc.',
+                'type': 'Common Stock'},
+            {'symbol': 'CSCO', 'description': 'Cisco Systems Inc.',
+                'type': 'Common Stock'}
+        ]
+
+        # Filter stocks based on the query
+        filtered_stocks = []
+        query = query.upper()
+        for stock in mock_stocks:
+            if query in stock['symbol'] or query.lower() in stock['description'].lower():
+                filtered_stocks.append({
+                    'symbol': stock['symbol'],
+                    'description': stock['description'],
+                    'displaySymbol': stock['symbol'],
+                    'type': stock['type'],
+                    'name': stock['description']
+                })
+
+        return jsonify({'result': filtered_stocks[:10]})  # Limit to 10 results
+    except Exception as e:
+        logger.error(f"Error searching stocks: {str(e)}")
+        return jsonify({'error': str(e), 'result': []}), 400
+
+
+@app.route('/api/stock/<symbol>', methods=['GET'])
+def get_stock(symbol):
+    try:
+        # Use mock data instead of Finnhub API to avoid 403 errors
+        mock_quote = {
+            'c': 175.34,  # Current price
+            'h': 177.50,  # High price of the day
+            'l': 174.20,  # Low price of the day
+            'o': 175.00,  # Open price of the day
+            'pc': 174.50,  # Previous close price
+            'dp': 0.48,   # Percent change
+            'd': 0.84     # Change
+        }
+
+        # Mock company profile
+        mock_profile = {
+            'name': f"{symbol} Inc.",
+            'exchange': 'NASDAQ',
+            'ipo': '1980-12-12',
+            'marketCapitalization': 2800000,
+            'shareOutstanding': 16000,
+            'logo': f"https://logo.clearbit.com/{symbol.lower()}.com",
+            'weburl': f"https://{symbol.lower()}.com",
+            'finnhubIndustry': 'Technology'
+        }
+
+        # Generate mock historical data (30 days)
+        end_date = datetime.now()
+        historical = []
+        base_price = 170.0
+
+        for i in range(30):
+            date = end_date - timedelta(days=i)
+            # Generate a somewhat realistic price movement
+            price = base_price + (random.random() - 0.5) * 10
+            historical.append({
+                'date': date.strftime('%Y-%m-%d'),
+                'close': str(round(price, 2))
+            })
+
+        # Sort by date ascending
+        historical.sort(key=lambda x: x['date'])
+
+        return jsonify({
+            'quote': mock_quote,
+            'profile': mock_profile,
+            'historical': historical
+        })
+    except Exception as e:
+        logger.error(f"Error fetching stock data for {symbol}: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/stock/<symbol>/news', methods=['GET'])
+def get_stock_news(symbol):
+    try:
+        # Use mock news data instead of Finnhub API
+        mock_news = [
+            {
+                'category': 'technology',
+                'datetime': int(datetime.now().timestamp()) - 3600,
+                'headline': f'{symbol} Announces New Product Line',
+                'id': 1,
+                'image': 'https://via.placeholder.com/640x360',
+                'related': symbol,
+                'source': 'Business Insider',
+                'summary': f'{symbol} is set to release a new line of products that could revolutionize the industry.',
+                'url': f'https://example.com/news/{symbol.lower()}/new-product'
+            },
+            {
+                'category': 'business',
+                'datetime': int(datetime.now().timestamp()) - 7200,
+                'headline': f'{symbol} Reports Strong Quarterly Earnings',
+                'id': 2,
+                'image': 'https://via.placeholder.com/640x360',
+                'related': symbol,
+                'source': 'CNBC',
+                'summary': f'{symbol} exceeded analyst expectations with its latest quarterly results.',
+                'url': f'https://example.com/news/{symbol.lower()}/earnings'
+            },
+            {
+                'category': 'technology',
+                'datetime': int(datetime.now().timestamp()) - 10800,
+                'headline': f'{symbol} Partners with Major Tech Company',
+                'id': 3,
+                'image': 'https://via.placeholder.com/640x360',
+                'related': symbol,
+                'source': 'TechCrunch',
+                'summary': f'{symbol} has announced a strategic partnership that could boost its market position.',
+                'url': f'https://example.com/news/{symbol.lower()}/partnership'
+            }
+        ]
+
+        return jsonify(mock_news)
+    except Exception as e:
+        logger.error(f"Error fetching news for {symbol}: {str(e)}")
+        return jsonify({'error': str(e)}), 400
 
 
 if __name__ == '__main__':
-    # Run the app on all network interfaces with port 5001
     app.run(host='0.0.0.0', port=5001, debug=True)

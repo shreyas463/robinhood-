@@ -5,11 +5,12 @@ A full-stack web application that replicates core features of Robinhood, built w
 ## Features
 
 - User authentication with Firebase
-- Real-time stock data using Finnhub API
+- Stock data visualization (using mock data)
 - Stock trading simulation
 - Portfolio management
 - Transaction history
 - News feed for stocks
+- Discussion forum for stocks
 
 ## Prerequisites
 
@@ -53,10 +54,8 @@ A full-stack web application that replicates core features of Robinhood, built w
    ```
 
 5. Update the `.env` file with your API keys and Firebase configuration:
-   - Add your Finnhub API key
-   - Add your Alpha Vantage API key
-   - Add your News API key
-   - Set the path to your Firebase service account key
+   - Add your Firebase service account key path
+   - Set a secret key for JWT token generation
 
 ### Frontend Setup
 
@@ -78,7 +77,6 @@ A full-stack web application that replicates core features of Robinhood, built w
 4. Update the `.env.local` file with your Firebase configuration:
    - Add your Firebase Web API key
    - Add your Firebase project configuration
-   - Add your Finnhub API key
 
 ## Running the Application
 
@@ -97,12 +95,19 @@ A full-stack web application that replicates core features of Robinhood, built w
 
 3. Access the application at [http://localhost:3000](http://localhost:3000)
 
-## API Keys Required
+## Implementation Notes
+
+### Mock Data
+
+This application uses mock data for stock information, search, and news to avoid requiring paid API subscriptions. In a production environment, you would replace these with actual API calls to services like:
 
 - [Finnhub](https://finnhub.io/) - For real-time stock data
 - [Alpha Vantage](https://www.alphavantage.co/) - For historical stock data
 - [News API](https://newsapi.org/) - For stock-related news
-- Firebase configuration - For authentication and database
+
+### Authentication
+
+The application uses Firebase Authentication for user management. The backend verifies Firebase ID tokens for secure API access.
 
 ## Environment Variables
 
@@ -110,10 +115,8 @@ A full-stack web application that replicates core features of Robinhood, built w
 ```
 FLASK_APP=app.py
 FLASK_ENV=development
-FINNHUB_API_KEY=your_finnhub_api_key_here
-ALPHA_VANTAGE_API_KEY=your_alpha_vantage_api_key_here
-NEWS_API_KEY=your_news_api_key_here
-GOOGLE_APPLICATION_CREDENTIALS=path/to/serviceAccountKey.json
+GOOGLE_APPLICATION_CREDENTIALS=serviceAccountKey.json
+SECRET_KEY=your-secret-key-here
 ```
 
 ### Frontend (.env.local)
@@ -125,7 +128,6 @@ NEXT_PUBLIC_FIREBASE_PROJECT_ID=your-project-id
 NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
 NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your-sender-id
 NEXT_PUBLIC_FIREBASE_APP_ID=your-app-id
-NEXT_PUBLIC_FINNHUB_API_KEY=your_finnhub_api_key_here
 ```
 
 ## Contributing

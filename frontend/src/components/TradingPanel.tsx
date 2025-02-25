@@ -22,6 +22,7 @@ import {
   Alert,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
+import { auth } from '@/firebase/config';
 
 interface PortfolioPosition {
   symbol: string;
@@ -53,10 +54,19 @@ export default function TradingPanel() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  const getToken = async () => {
+    if (!auth.currentUser) return null;
+    try {
+      return await auth.currentUser.getIdToken(true);
+    } catch (error) {
+      console.error("Error refreshing token:", error);
+      return null;
+    }
+  };
+
   const fetchBalance = async () => {
     try {
-      const userData = localStorage.getItem('user');
-      const token = userData ? JSON.parse(userData).token : null;
+      const token = await getToken();
       if (!token) {
         setError('Please log in to view your balance');
         return;
@@ -77,8 +87,7 @@ export default function TradingPanel() {
 
   const fetchTransactions = async () => {
     try {
-      const userData = localStorage.getItem('user');
-      const token = userData ? JSON.parse(userData).token : null;
+      const token = await getToken();
       if (!token) {
         setError('Please log in to view your transactions');
         return;
@@ -104,43 +113,70 @@ export default function TradingPanel() {
 
   const handleAddFunds = async () => {
     try {
-      const userData = localStorage.getItem('user');
-      const token = userData ? JSON.parse(userData).token : null;
+      setError('');
+      setSuccess('');
+      
+      if (!addFundsAmount || isNaN(parseFloat(addFundsAmount)) || parseFloat(addFundsAmount) <= 0) {
+        setError('Please enter a valid amount');
+        return;
+      }
+      
+      const token = await getToken();
       if (!token) {
         setError('Please log in to add funds');
         return;
       }
+      
       const response = await fetch('http://localhost:5001/api/trading/add-funds', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ amount: parseFloat(addFundsAmount) })
+        body: JSON.stringify({
+          amount: parseFloat(addFundsAmount)
+        })
       });
+      
       const data = await response.json();
+      
       if (response.ok) {
-        setSuccess('Funds added successfully');
-        setBalance(data.new_balance);
-        setOpenAddFunds(false);
+        setSuccess(`Successfully added $${addFundsAmount}`);
         setAddFundsAmount('');
+        setOpenAddFunds(false);
+        fetchBalance();
       } else {
-        setError(data.error);
+        setError(data.error || 'Failed to add funds');
       }
     } catch (error) {
-      setError('Failed to add funds');
+      setError('An error occurred while adding funds');
     }
   };
 
   const handleTrade = async (type: 'buy' | 'sell') => {
     try {
-      const userData = localStorage.getItem('user');
-      const token = userData ? JSON.parse(userData).token : null;
+      setError('');
+      setSuccess('');
+      
+      if (!selectedStock) {
+        setError('Please select a stock');
+        return;
+      }
+      
+      if (!shares || isNaN(parseFloat(shares)) || parseFloat(shares) <= 0) {
+        setError('Please enter a valid number of shares');
+        return;
+      }
+      
+      const token = await getToken();
       if (!token) {
         setError('Please log in to trade');
         return;
       }
-      const response = await fetch(`http://localhost:5001/api/trading/${type}`, {
+      
+      const endpoint = type === 'buy' ? '/api/trading/buy' : '/api/trading/sell';
+      
+      const response = await fetch(`http://localhost:5001${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -148,21 +184,22 @@ export default function TradingPanel() {
         },
         body: JSON.stringify({
           symbol: selectedStock,
-          shares: parseInt(shares)
+          shares: parseFloat(shares)
         })
       });
+      
       const data = await response.json();
+      
       if (response.ok) {
-        setSuccess(`${type === 'buy' ? 'Purchase' : 'Sale'} successful`);
+        setSuccess(`Successfully ${type === 'buy' ? 'bought' : 'sold'} ${shares} shares of ${selectedStock}`);
+        setShares('');
         fetchBalance();
         fetchTransactions();
-        setSelectedStock('');
-        setShares('');
       } else {
-        setError(data.error);
+        setError(data.error || `Failed to ${type} shares`);
       }
     } catch (error) {
-      setError(`Failed to ${type} stock`);
+      setError(`An error occurred while ${type === 'buy' ? 'buying' : 'selling'} shares`);
     }
   };
 

@@ -41,6 +41,7 @@ Thumbs.db
 **/firebase-debug.log*
 **/firebase-debug.*.log*
 **/firebase-adminsdk.json
+**/serviceAccountKey.json
 
 # OS
 .DS_Store
