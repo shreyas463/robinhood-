@@ -3,25 +3,44 @@ frontend/node_modules/
 frontend/.next/
 frontend/.env.local
 frontend/.env
-frontend/build
+frontend/build/
 frontend/.DS_Store
 frontend/npm-debug.log*
 frontend/yarn-debug.log*
 frontend/yarn-error.log*
+frontend/package-lock.json
 
 # Backend
 backend/venv/
 backend/__pycache__/
 backend/*.pyc
-backend/instance/
 backend/.env
 backend/*.db
+backend/serviceAccountKey.json
+backend/instance/
 
 # IDE/Editor
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Firebase
+**/firebase-debug.log*
+**/firebase-debug.*.log*
+**/firebase-adminsdk.json
 
 # OS
 .DS_Store
